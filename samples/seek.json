@@ -1,0 +1,11 @@
+{
+  "title": "河桥定位续映演练",
+  "editions": [
+    {"edition_id": "main", "length": 6, "sound_windows": []}
+  ],
+  "segments": [
+    {"segment_id": "A", "length": 2, "deadlines": {"main": 4}},
+    {"segment_id": "B", "length": 2, "deadlines": {"main": 6}}
+  ],
+  "signals": []
+}
