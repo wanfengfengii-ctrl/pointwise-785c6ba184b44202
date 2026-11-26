@@ -9,7 +9,7 @@ from booth.status import read_booth_status
 from program.catalog import build_revision
 from program.editions import require_identifier, require_integer
 from program.repository import initialize_program_store, save_program_revision
-from record.closeout import close_show, find_closeout_by_show, initialize_closeout_store
+from record.closeout import close_show, closeout_view, find_closeout_by_show, initialize_closeout_store
 from record.ledger import initialize_ledger
 from record.readback import read_show_record
 from release.issue import issue_revision
@@ -18,6 +18,7 @@ from release.repository import get_issued_program, initialize_issue_store
 from show.clock import AdvanceConflict, advance_show
 from show.opening import start_show
 from show.repository import initialize_show_store, load_show, mark_show_closed, show_view
+from show.seek import SeekConflict, initialize_seek_store, seek_show
 from show.signal_input import SignalRequired
 
 
@@ -34,6 +35,7 @@ def initialize_application(database) -> None:
         initialize_issue_store(connection)
         initialize_booth_store(connection)
         initialize_show_store(connection)
+        initialize_seek_store(connection)
         initialize_ledger(connection)
         initialize_closeout_store(connection)
 
@@ -78,13 +80,32 @@ def _advance(connection, body):
     signal = body.get('signal')
     if signal is not None:
         signal = require_identifier(signal, 'signal')
-    result = advance_show(connection, _number(body, 'show_id'), tick, signal)
+    position_present = 'position' in body
+    position = require_integer(body.get('position'), 'position') if position_present else None
+    result = advance_show(
+        connection,
+        _number(body, 'show_id'),
+        tick,
+        signal,
+        position=position,
+        position_present=position_present,
+    )
     return 200, {
         'tick': result.tick,
         'action': asdict(result.action),
         'ended_segment': result.ended_segment,
         'show': show_view(result.show),
     }
+
+
+def _seek(connection, body):
+    result = seek_show(
+        connection,
+        _number(body, 'show_id'),
+        require_integer(body.get('position'), 'position'),
+        require_integer(body.get('target_tick'), 'target_tick'),
+    )
+    return 200, asdict(result)
 
 
 def _handover(connection, body):
@@ -98,7 +119,7 @@ def _close(connection, body):
         previous = find_closeout_by_show(connection, show.show_id)
         if previous is None:
             raise RuntimeError('closed show has no summary')
-        return 200, {'closed': True, 'summary': asdict(previous)}
+        return 200, {'closed': True, 'summary': closeout_view(previous)}
 
     issued = get_issued_program(connection, show.issue_id)
     completion, summary = close_show(connection, issued, show)
@@ -106,7 +127,7 @@ def _close(connection, body):
         return 409, {'closed': False, 'error': 'show_incomplete', **asdict(completion)}
     mark_show_closed(connection, show.show_id)
     release_show(connection, show.booth, show.show_id)
-    return 200, {'closed': True, 'summary': asdict(summary)}
+    return 200, {'closed': True, 'summary': closeout_view(summary)}
 
 
 def _read(connection, body):
@@ -121,6 +142,7 @@ _OPERATIONS = {
     'mount': _mount,
     'start': _start,
     'advance': _advance,
+    'seek': _seek,
     'handover': _handover,
     'close': _close,
     'read': _read,
@@ -142,5 +164,5 @@ def handle_operation(database, operation: str, payload) -> tuple[int, dict]:
         return 400, {'error': str(error)}
     except LookupError as error:
         return 404, {'error': str(error)}
-    except (BoothConflict, AdvanceConflict, SignalRequired) as error:
+    except (BoothConflict, AdvanceConflict, SeekConflict, SignalRequired) as error:
         return 409, {'error': str(error)}

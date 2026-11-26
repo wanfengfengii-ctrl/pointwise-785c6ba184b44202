@@ -2,7 +2,7 @@ from dataclasses import asdict, dataclass
 import sqlite3
 
 from booth.sessions import BoothAssignment, load_assignment
-from record.ledger import PlaybackInterval, list_intervals
+from record.ledger import PlaybackInterval, interval_view, list_intervals
 from show.repository import ShowSession, load_show, show_view
 
 
@@ -13,10 +13,14 @@ class BoothStatus:
     intervals: tuple[PlaybackInterval, ...]
 
     def public_view(self) -> dict:
+        located = self.show is not None and self.show.position is not None
         return {
             'assignment': asdict(self.assignment),
             'show': show_view(self.show) if self.show is not None else None,
-            'intervals': [asdict(interval) for interval in self.intervals],
+            'intervals': [
+                interval_view(interval, located=located)
+                for interval in self.intervals
+            ],
         }
 
 

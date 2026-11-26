@@ -1,6 +1,7 @@
 from dataclasses import dataclass, replace
 
 from program.editions import fits_narration
+from release.feasibility import _single_schedule
 from release.repository import IssuedProgram
 from show.repository import ActiveSegment, ShowSession
 
@@ -11,10 +12,36 @@ class TickAction:
     segment_id: str | None = None
 
 
+def decide_replanned_action(issued: IssuedProgram, show: ShowSession) -> TickAction:
+    """Choose a safe start/wait after a seek moved the film tick."""
+    if not show.remaining or show.edition_id is None:
+        return TickAction('wait')
+
+    edition = issued.revision.edition(show.edition_id)
+    segments = tuple(issued.revision.segment(segment_id) for segment_id in show.remaining)
+    if _single_schedule(edition, segments, show.next_tick) is None:
+        raise RuntimeError('seeked show has no feasible remaining schedule')
+
+    for index, segment in enumerate(segments):
+        if not fits_narration(
+            edition,
+            show.next_tick,
+            segment.length,
+            segment.deadline_for(edition.edition_id),
+        ):
+            continue
+        rest = segments[:index] + segments[index + 1:]
+        if _single_schedule(edition, rest, show.next_tick + segment.length) is not None:
+            return TickAction('start', segment.segment_id)
+    return TickAction('wait')
+
+
 def decide_tick_action(issued: IssuedProgram, show: ShowSession) -> TickAction:
     tick = show.next_tick
     if show.active is not None:
         return TickAction('continue', show.active.segment_id)
+    if show.position is not None:
+        return decide_replanned_action(issued, show)
 
     segment_id = issued.basis.segment_starting_at(tick, show.edition_id)
     if segment_id is None:

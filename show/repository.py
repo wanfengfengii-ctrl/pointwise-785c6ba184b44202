@@ -23,10 +23,14 @@ class ShowSession:
     active: ActiveSegment | None
     completed: tuple[str, ...]
     closed: bool
+    # None means the show has never been located; its site position equals tick.
+    position: int | None = None
 
 
 def show_view(show: ShowSession) -> dict:
     view = asdict(show)
+    if show.position is None:
+        view.pop('position', None)
     if show.active is not None:
         view['active'] = {
             'segment_id': show.active.segment_id,
@@ -34,6 +38,10 @@ def show_view(show: ShowSession) -> dict:
             'remaining_ticks': show.active.finish_tick - show.next_tick,
         }
     return view
+
+
+def _columns(connection: sqlite3.Connection, table: str) -> set[str]:
+    return {row[1] for row in connection.execute(f'PRAGMA table_info({table})')}
 
 
 def initialize_show_store(connection: sqlite3.Connection) -> None:
@@ -49,9 +57,13 @@ def initialize_show_store(connection: sqlite3.Connection) -> None:
             remaining TEXT NOT NULL,
             active TEXT,
             completed TEXT NOT NULL,
-            closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1))
+            closed INTEGER NOT NULL DEFAULT 0 CHECK (closed IN (0, 1)),
+            site_position INTEGER
         )
     ''')
+    columns = _columns(connection, 'show_sessions')
+    if 'site_position' not in columns:
+        connection.execute('ALTER TABLE show_sessions ADD COLUMN site_position INTEGER')
 
 
 def insert_show(
@@ -67,16 +79,18 @@ def insert_show(
 
 def load_show(connection: sqlite3.Connection, show_id: int) -> ShowSession:
     row = connection.execute('''
-        SELECT booth, mount_id, issue_id, next_tick, edition_id, signal, remaining, active, completed, closed
+        SELECT booth, mount_id, issue_id, next_tick, edition_id, signal, remaining, active,
+               completed, closed, site_position
         FROM show_sessions WHERE show_id = ?
     ''', (show_id,)).fetchone()
     if row is None:
         raise LookupError('show_not_found')
-    booth, mount_id, issue_id, tick, edition_id, signal, remaining, active, completed, closed = row
+    (booth, mount_id, issue_id, tick, edition_id, signal, remaining, active,
+     completed, closed, position) = row
     return ShowSession(
         show_id, booth, mount_id, issue_id, tick, edition_id, signal,
         tuple(json.loads(remaining)), ActiveSegment(**json.loads(active)) if active is not None else None,
-        tuple(json.loads(completed)), bool(closed),
+        tuple(json.loads(completed)), bool(closed), position,
     )
 
 
@@ -84,11 +98,13 @@ def save_show_progress(connection: sqlite3.Connection, show: ShowSession, expect
     active = None if show.active is None else json.dumps(asdict(show.active), ensure_ascii=False)
     cursor = connection.execute('''
         UPDATE show_sessions
-        SET next_tick = ?, edition_id = ?, signal = ?, remaining = ?, active = ?, completed = ?
+        SET next_tick = ?, edition_id = ?, signal = ?, remaining = ?, active = ?,
+            completed = ?, site_position = ?
         WHERE show_id = ? AND next_tick = ? AND closed = 0
     ''', (
         show.next_tick, show.edition_id, show.signal, json.dumps(show.remaining, ensure_ascii=False),
-        active, json.dumps(show.completed, ensure_ascii=False), show.show_id, expected_tick,
+        active, json.dumps(show.completed, ensure_ascii=False), show.position,
+        show.show_id, expected_tick,
     ))
     if cursor.rowcount != 1:
         raise RuntimeError('show progress was not updated')

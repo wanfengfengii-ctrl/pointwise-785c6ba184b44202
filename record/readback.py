@@ -1,9 +1,10 @@
 from dataclasses import asdict
 import sqlite3
 
-from record.closeout import find_closeout_by_number, find_closeout_by_show
-from record.ledger import list_intervals
+from record.closeout import closeout_view, find_closeout_by_number, find_closeout_by_show
+from record.ledger import interval_view, list_intervals
 from show.repository import load_show, show_view
+from show.seek import list_seeks
 
 
 def read_show_record(
@@ -20,9 +21,24 @@ def read_show_record(
         summary = find_closeout_by_show(connection, show_id)
 
     show = load_show(connection, show_id)
-    intervals = summary.intervals if summary is not None else list_intervals(connection, show_id)
-    return {
+    if summary is not None:
+        summary_document = closeout_view(summary)
+        intervals = summary_document['intervals']
+        seeks = summary.seeks
+        closeout = summary_document
+    else:
+        seeks = list_seeks(connection, show_id)
+        intervals = [
+            interval_view(interval, located=bool(seeks))
+            for interval in list_intervals(connection, show_id)
+        ]
+        closeout = None
+
+    record = {
         'show': show_view(show),
-        'intervals': [asdict(interval) for interval in intervals],
-        'closeout': asdict(summary) if summary is not None else None,
+        'intervals': intervals,
+        'closeout': closeout,
     }
+    if seeks:
+        record['seeks'] = [asdict(seek) for seek in seeks]
+    return record

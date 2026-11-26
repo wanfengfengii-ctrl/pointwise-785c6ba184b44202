@@ -3,9 +3,10 @@ import json
 import sqlite3
 
 from record.completion import CompletionResult, evaluate_completion
-from record.ledger import PlaybackInterval, list_intervals
+from record.ledger import PlaybackInterval, interval_view, list_intervals
 from release.repository import IssuedProgram
 from show.repository import ShowSession
+from show.seek import SeekRecord, list_seeks
 
 
 @dataclass(frozen=True)
@@ -17,6 +18,7 @@ class CloseoutSummary:
     signal: str | None
     closed_at_tick: int
     intervals: tuple[PlaybackInterval, ...]
+    seeks: tuple[SeekRecord, ...] = ()
 
 
 def initialize_closeout_store(connection: sqlite3.Connection) -> None:
@@ -29,27 +31,48 @@ def initialize_closeout_store(connection: sqlite3.Connection) -> None:
     ''')
 
 
+def closeout_view(summary: CloseoutSummary) -> dict:
+    located = bool(summary.seeks)
+    view = asdict(summary)
+    view['intervals'] = [
+        interval_view(interval, located=located)
+        for interval in summary.intervals
+    ]
+    if not located:
+        view.pop('seeks', None)
+    return view
+
+
 def close_show(
     connection: sqlite3.Connection, issued: IssuedProgram, show: ShowSession
 ) -> tuple[CompletionResult, CloseoutSummary | None]:
     intervals = list_intervals(connection, show.show_id)
-    completion = evaluate_completion(issued, show, intervals)
+    seeks = list_seeks(connection, show.show_id)
+    completion = evaluate_completion(issued, show, intervals, seeks)
     if not completion.complete:
         return completion, None
 
+    located = bool(seeks)
     payload = {
         'issue_id': show.issue_id,
         'edition_id': show.edition_id,
         'signal': show.signal,
         'closed_at_tick': show.next_tick,
-        'intervals': [asdict(interval) for interval in intervals],
+        'intervals': [
+            interval_view(interval, located=located)
+            for interval in intervals
+        ],
     }
+    if seeks:
+        payload['seeks'] = [asdict(record) for record in seeks]
+
     cursor = connection.execute(
         'INSERT INTO closeouts (show_id, summary) VALUES (?, ?)',
         (show.show_id, json.dumps(payload, ensure_ascii=False)),
     )
     return completion, CloseoutSummary(
-        cursor.lastrowid, show.show_id, show.issue_id, show.edition_id, show.signal, show.next_tick, intervals
+        cursor.lastrowid, show.show_id, show.issue_id, show.edition_id, show.signal,
+        show.next_tick, intervals, seeks,
     )
 
 
@@ -59,6 +82,7 @@ def _decode_summary(row) -> CloseoutSummary | None:
     closeout_id, show_id, raw = row
     payload = json.loads(raw)
     payload['intervals'] = tuple(PlaybackInterval(**item) for item in payload['intervals'])
+    payload['seeks'] = tuple(SeekRecord(**item) for item in payload.get('seeks', ()))
     return CloseoutSummary(closeout_id, show_id, **payload)
 
 
